@@ -4,6 +4,7 @@ Every other module imports `settings` from here instead of calling os.getenv.
 Values come from the nearest .env (searched upward from where you run `uv run`).
 """
 
+import os
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -51,3 +52,9 @@ def _is_placeholder(key: SecretStr | None) -> bool:
 
 
 settings = Settings()
+
+# Tracing on with a placeholder key makes LangChain spam 403 errors on every call: turn it off instead
+if settings.langsmith_tracing and "LANGSMITH_API_KEY" in settings.missing_keys():
+    print("⚠️  LANGSMITH_TRACING=true but LANGSMITH_API_KEY is not set: tracing disabled for this run")
+    settings.langsmith_tracing = False
+    os.environ["LANGSMITH_TRACING"] = "false"

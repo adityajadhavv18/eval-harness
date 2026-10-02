@@ -12,6 +12,7 @@ import statistics
 
 from eval_harness.config import settings
 from eval_harness.schema import GoldenItem, QuestionResult
+from eval_harness.tracing import judge_tracing, traced_openai
 
 # USD per 1M tokens (input, output). Update when prices or models change.
 PRICES = {
@@ -61,11 +62,12 @@ def retrieval_scores(item: GoldenItem, result: QuestionResult) -> dict[str, floa
 
 # ---------- Generation (LLM judge) ----------
 
-def ragas_scores(golden: list[GoldenItem], results: list[QuestionResult]) -> dict[str, dict[str, float]]:
-    """RAGAS on answerable questions that ran successfully. Returns {golden_id: {metric: score}}."""
+def ragas_scores(golden: list[GoldenItem], results: list[QuestionResult]) -> tuple[dict[str, dict[str, float]], float]:
+    """RAGAS on answerable questions that ran successfully. Returns ({golden_id: {metric: score}}, judge cost USD)."""
     from langchain_community.embeddings import FastEmbedEmbeddings
     from langchain_openai import ChatOpenAI
     from ragas import EvaluationDataset, SingleTurnSample, evaluate
+    from ragas.cost import get_token_usage_for_openai
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.llms import LangchainLLMWrapper
     from ragas.metrics import Faithfulness, LLMContextPrecisionWithReference, LLMContextRecall, ResponseRelevancy
@@ -73,7 +75,7 @@ def ragas_scores(golden: list[GoldenItem], results: list[QuestionResult]) -> dic
     by_id = {g.id: g for g in golden}
     scored = [r for r in results if r.output is not None and by_id[r.golden_id].question_type != "no_answer"]
     if not scored:
-        return {}
+        return {}, 0.0
 
     samples = [
         SingleTurnSample(
@@ -84,26 +86,31 @@ def ragas_scores(golden: list[GoldenItem], results: list[QuestionResult]) -> dic
         )
         for r in scored
     ]
-    result = evaluate(
-        EvaluationDataset(samples=samples),
-        metrics=[Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(), LLMContextRecall()],
-        llm=LangchainLLMWrapper(ChatOpenAI(model=settings.judge_model, temperature=0)),
-        embeddings=LangchainEmbeddingsWrapper(FastEmbedEmbeddings(model_name=settings.embed_model)),
-    )
+    with judge_tracing():
+        result = evaluate(
+            EvaluationDataset(samples=samples),
+            metrics=[Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithReference(), LLMContextRecall()],
+            llm=LangchainLLMWrapper(ChatOpenAI(model=settings.judge_model, temperature=0)),
+            embeddings=LangchainEmbeddingsWrapper(FastEmbedEmbeddings(model_name=settings.embed_model)),
+            token_usage_parser=get_token_usage_for_openai,
+        )
     df = result.to_pandas()
     out = {}
     for r, (_, row) in zip(scored, df.iterrows()):
         # RAGAS returns NaN when a judge call fails; drop it rather than count it as 0
         out[r.golden_id] = {ours: float(row[col]) for col, ours in RAGAS_KEYS.items()
                             if col in row and not math.isnan(row[col])}
-    return out
+
+    price = _price(settings.judge_model)
+    judge_cost = result.total_cost(cost_per_input_token=price[0] / 1e6, cost_per_output_token=price[1] / 1e6) \
+        if price else 0.0
+    return out, judge_cost
 
 
-def abstention_score(question: str, answer: str) -> float:
-    """For no_answer questions: 1.0 if the pipeline declined instead of inventing an answer."""
-    from openai import OpenAI
-
-    resp = OpenAI().chat.completions.create(
+def abstention_score(question: str, answer: str) -> tuple[float, float]:
+    """For no_answer questions: (1.0 if the pipeline declined instead of inventing an answer, judge cost USD)."""
+    with judge_tracing():
+        resp = traced_openai().chat.completions.create(
         model=settings.judge_model,
         temperature=0,
         messages=[{
@@ -114,14 +121,21 @@ def abstention_score(question: str, answer: str) -> float:
                        "giving a specific figure or fact? Reply with exactly one word: yes or no.",
         }],
     )
-    return 1.0 if resp.choices[0].message.content.strip().lower().startswith("yes") else 0.0
+    score = 1.0 if resp.choices[0].message.content.strip().lower().startswith("yes") else 0.0
+    cost = cost_usd(resp.usage.prompt_tokens, resp.usage.completion_tokens, settings.judge_model) or 0.0
+    return score, cost
 
 
 # ---------- Cost ----------
 
+def _price(model: str) -> tuple[float, float] | None:
+    # Longest prefix wins, so "gpt-4o-mini-2024-07-18" matches "gpt-4o-mini", not "gpt-4o"
+    return next((p for name, p in sorted(PRICES.items(), key=lambda kv: -len(kv[0])) if model.startswith(name)), None)
+
+
 def cost_usd(tokens_in: int, tokens_out: int, model: str) -> float | None:
-    """Generation cost of one pipeline call. None if the model isn't in PRICES."""
-    price = next((p for name, p in sorted(PRICES.items(), key=lambda kv: -len(kv[0])) if model.startswith(name)), None)
+    """Cost of one LLM call. None if the model isn't in PRICES."""
+    price = _price(model)
     if price is None:
         return None
     return (tokens_in * price[0] + tokens_out * price[1]) / 1_000_000
@@ -140,15 +154,24 @@ def score_run(golden: list[GoldenItem], results: list[QuestionResult], use_llm_j
             if cost is not None:
                 r.scores["cost_usd"] = cost
 
+    judge_cost = 0.0
     if use_llm_judge:
-        for gid, scores in ragas_scores(golden, results).items():
+        per_question, judge_cost = ragas_scores(golden, results)
+        for gid, scores in per_question.items():
             next(r for r in results if r.golden_id == gid).scores.update(scores)
         for r in results:
             item = by_id[r.golden_id]
             if item.question_type == "no_answer":
-                r.scores["abstention"] = abstention_score(item.question, r.output.answer) if r.output else 0.0
+                if r.output is None:
+                    r.scores["abstention"] = 0.0
+                    continue
+                r.scores["abstention"], cost = abstention_score(item.question, r.output.answer)
+                judge_cost += cost
 
-    return summarize(results)
+    summary = summarize(results)
+    if use_llm_judge:
+        summary["judge_cost_usd"] = judge_cost  # what grading cost, separate from what the pipeline cost
+    return summary
 
 
 def summarize(results: list[QuestionResult]) -> dict[str, float]:
