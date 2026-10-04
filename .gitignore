@@ -4,3 +4,4 @@ __pycache__/
 # Run outputs are regenerated; keep the folder, not the files
 results/*
 !results/.gitkeep
+!results/baseline_*.json

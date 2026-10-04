@@ -2,6 +2,20 @@
 
 A reusable evaluation harness for RAG pipelines. Every architecture in [rag-sprints](https://github.com/adityajadhavv18/rag-sprints) is scored against the same golden set, so results are directly comparable.
 
+## Usage
+
+```python
+from eval_harness import evaluate, set_baseline
+
+evaluate(my_pipeline, arch="hybrid")          # run, score, save results/hybrid_<time>.json, print report
+set_baseline("naive_20261003-1430.json")      # promote a run to results/baseline_v1.json (explicit step)
+```
+
+```bash
+uv run compare-runs hybrid_....json           # report vs the baseline
+uv run compare-runs hybrid_....json naive_....json
+```
+
 ## The contract
 
 A pipeline is any function `question: str -> PipelineOutput`:
