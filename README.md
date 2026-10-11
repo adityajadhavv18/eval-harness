@@ -42,7 +42,9 @@ The runner, not the pipeline, measures latency, so timing is identical across ar
 
 ## Golden set
 
-`golden_sets/golden_v1.jsonl`: 30 questions over Apple, Microsoft and Tesla 10-Ks (15 simple, 8 multi-part, 4 exact-term, 3 unanswerable). Each item has a verbatim `evidence` quote from its source document. Changing questions means creating a new version file and re-running the baseline.
+`golden_sets/golden_v1.jsonl`: 30 questions over Apple, Microsoft and Tesla 10-Ks (15 simple, 8 multi-part, 4 exact-term, 3 unanswerable). Each item has a verbatim `evidence` quote from its source document.
+
+`golden_sets/golden_medical_v1.jsonl`: 30 questions over the synthetic hospital corpus in rag-sprints (10 simple, 6 multi-part, 10 exact-term, 4 unanswerable), written to separate keyword and vector retrieval. Pass it with `evaluate(..., golden_set="golden_medical_v1.jsonl")`; its baseline is `results/baseline_medical_v1.json`. Changing questions means creating a new version file and re-running the baseline.
 
 ## Setup
 
