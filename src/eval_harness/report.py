@@ -15,7 +15,7 @@ from pathlib import Path
 
 from eval_harness.config import settings
 from eval_harness.golden import load_golden
-from eval_harness.metrics import score_run
+from eval_harness.metrics import apply_refusal_rule, score_run, summarize
 from eval_harness.runner import run_pipeline
 from eval_harness.schema import PipelineFn, RunResult
 from eval_harness.tracing import flush
@@ -26,14 +26,16 @@ SECTIONS = {
                          ("doc_hit", "doc hit"), ("doc_mrr", "doc MRR")],
     "Generation (judge)": [("faithfulness", "faithfulness"), ("answer_relevancy", "answer relevancy"),
                            ("context_precision", "context precision"), ("context_recall", "context recall")],
-    "No-answer (judge)": [("abstention", "abstention")],
+    # abstention: no_answer questions declined (judge, higher is better)
+    # false refusal rate: answerable questions declined (free, lower is better)
+    "Refusals": [("abstention", "abstention"), ("false_refusal_rate", "false refusal rate")],
     "Engineering": [("latency_p50_ms", "latency p50 (ms)"), ("latency_p95_ms", "latency p95 (ms)"),
                     ("cost_per_query_usd", "cost / query ($)"), ("judge_cost_usd", "judge cost ($)"),
                     ("error_rate", "error rate")],
 }
 LOWER_IS_BETTER = {"latency_mean_ms", "latency_p50_ms", "latency_p95_ms", "cost_per_query_usd",
-                   "cost_total_usd", "judge_cost_usd", "error_rate"}
-BY_TYPE_KEYS = ["evidence_recall", "faithfulness", "context_recall", "abstention"]
+                   "cost_total_usd", "judge_cost_usd", "error_rate", "false_refusal_rate"}
+BY_TYPE_KEYS = ["evidence_recall", "faithfulness", "context_recall", "refused", "abstention"]
 
 
 def evaluate(
@@ -93,6 +95,19 @@ def set_baseline(result_path: str | Path) -> Path:
     shutil.copyfile(Path(result_path) if Path(result_path).exists() else settings.results_dir / result_path, target)
     print(f"✅ '{run.arch}' run from {run.started_at:%Y-%m-%d %H:%M} is now the baseline for {run.golden_set}")
     return target
+
+
+def rescore_refusals(path: str | Path) -> RunResult:
+    """Apply the refusal rule to a run saved before it existed, and overwrite the file. No judge calls, free."""
+    run = load_run(path)
+    apply_refusal_rule(load_golden(run.golden_set), run.questions)
+    judge_cost = run.summary.get("judge_cost_usd")
+    run.summary = summarize(run.questions)
+    if judge_cost is not None:
+        run.summary["judge_cost_usd"] = judge_cost
+    target = Path(path) if Path(path).exists() else settings.results_dir / path
+    target.write_text(run.model_dump_json(indent=2))
+    return run
 
 
 def _resolve_reference(compare_to, golden_set: str) -> RunResult | None:
@@ -191,3 +206,14 @@ def main():
     run = load_run(sys.argv[1])
     reference = load_run(sys.argv[2]) if len(sys.argv) > 2 else _resolve_reference("baseline", run.golden_set)
     print_report(run, reference)
+
+
+def rescore_main():
+    """uv run rescore-refusals <run.json> ...   (no arguments: every saved run in results/)"""
+    paths = sys.argv[1:] or sorted(settings.results_dir.glob("*.json"))
+    for path in paths:
+        before = load_run(path).summary.get("faithfulness")
+        s = rescore_refusals(path).summary
+        faith = f"{before:.2f} -> {s['faithfulness']:.2f}" if before is not None and "faithfulness" in s else "-"
+        rate = f"{s['false_refusal_rate']:.2f}" if "false_refusal_rate" in s else "-"
+        print(f"  {Path(path).name:40}  faithfulness {faith:>12}   false refusal rate {rate}")

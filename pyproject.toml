@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 compare-runs = "eval_harness.report:main"
+rescore-refusals = "eval_harness.report:rescore_main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]

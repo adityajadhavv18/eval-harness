@@ -37,8 +37,11 @@ The runner, not the pipeline, measures latency, so timing is identical across ar
 |---|---|---|
 | Retrieval | doc hit / MRR, evidence recall / MRR (did the exact answer passage come back?) | free |
 | Generation | RAGAS faithfulness, answer relevancy, context precision, context recall | LLM judge |
-| No-answer | abstention (declined instead of inventing an answer) | LLM judge |
+| Refusals | abstention (no-answer questions declined instead of inventing an answer) | LLM judge |
+| | false refusal rate (answerable questions declined) | free |
 | Engineering | latency mean / p50 / p95, cost per query, error rate | free |
+
+**Refusals are not scored for faithfulness.** An answer that starts with "I don't know" makes no claims, so there is nothing to check: RAGAS gave the identical refusal 0.0, 0.5, 0.67 and 1.0 across runs, which made faithfulness mostly a count of refusals. Refusals on answerable questions are counted in `false_refusal_rate` instead. A partial answer that makes a claim before declining is still judged. Runs saved before this rule can be re-scored for free (no judge calls): `uv run rescore-refusals <run.json> ...`.
 
 ## Golden set
 

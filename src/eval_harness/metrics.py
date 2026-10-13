@@ -126,6 +126,33 @@ def abstention_score(question: str, answer: str) -> tuple[float, float]:
     return score, cost
 
 
+# ---------- Refusals (free) ----------
+
+# An answer that only declines makes no claims, so faithfulness has nothing to check: RAGAS scored the same
+# "I don't know based on the provided documents." 0.0, 0.5, 0.67 and 1.0 across runs. So refusals get no
+# faithfulness score, and false_refusal_rate counts how often an ANSWERABLE question was declined instead.
+# Only answers that START by declining count: a partial answer still makes claims and is still judged.
+_REFUSAL = re.compile(r"^i (don't|do not) know\b")
+
+
+def is_refusal(answer: str) -> bool:
+    return bool(_REFUSAL.match(_norm(answer).replace("’", "'")))  # curly apostrophe -> straight
+
+
+def apply_refusal_rule(golden: list[GoldenItem], results: list[QuestionResult]) -> None:
+    """In place: every answered, answerable question gets refused = 1.0 or 0.0; refusals lose faithfulness.
+    Safe to run twice, so it can also re-score saved runs (no judge calls needed)."""
+    by_id = {g.id: g for g in golden}
+    for r in results:
+        # Skip no_answer questions (abstention covers them), crashes, and retrieval-only runs (empty answer)
+        if by_id[r.golden_id].question_type == "no_answer" or r.output is None or not r.output.answer.strip():
+            continue
+        refused = is_refusal(r.output.answer)
+        r.scores["refused"] = float(refused)
+        if refused:
+            r.scores.pop("faithfulness", None)
+
+
 # ---------- Cost ----------
 
 def _price(model: str) -> tuple[float, float] | None:
@@ -167,6 +194,7 @@ def score_run(golden: list[GoldenItem], results: list[QuestionResult], use_llm_j
                     continue
                 r.scores["abstention"], cost = abstention_score(item.question, r.output.answer)
                 judge_cost += cost
+    apply_refusal_rule(golden, results)
 
     summary = summarize(results)
     if use_llm_judge:
@@ -183,6 +211,8 @@ def summarize(results: list[QuestionResult]) -> dict[str, float]:
     for name in metric_names:
         values = [r.scores[name] for r in results if name in r.scores]
         summary[name] = statistics.mean(values)
+    if "refused" in summary:  # the share of answerable questions declined
+        summary["false_refusal_rate"] = summary.pop("refused")
 
     latencies = sorted(r.latency_ms for r in results if r.error is None)
     if latencies:
