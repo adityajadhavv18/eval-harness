@@ -30,7 +30,7 @@ class GoldenItem(_Strict):
     ground_truth: str  # the reference answer; for no_answer items, what a correct refusal says
     source_doc: str | None = None  # which doc the answer lives in; None only for no_answer
     question_type: QuestionType = "simple"
-    evidence: str | None = None  # verbatim quote from source_doc backing ground_truth, for human review
+    evidence: str | None = None  # verbatim quote(s) backing ground_truth; " || " lists other wordings (metrics.py)
 
     @model_validator(mode="after")
     def _source_matches_type(self):

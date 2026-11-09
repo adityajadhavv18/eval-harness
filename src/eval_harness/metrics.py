@@ -34,9 +34,16 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+def _evidence_parts(item: GoldenItem) -> list[list[str]]:
+    """Evidence joins several verbatim quotes with " ... " or " / ": parts that must ALL be retrieved (same convention
+    as check_golden.py). A part may list other passages that state the same fact in other words, joined by " || "
+    (a scorecard line and a match report both giving "208/7"): any one of them retrieves that part."""
+    return [[_norm(a) for a in part.split(" || ") if a.strip()]
+            for part in re.split(r" \.\.\. | / ", item.evidence or "") if part.strip()]
+
+
 def _evidence_fragments(item: GoldenItem) -> list[str]:
-    # Evidence joins several verbatim quotes with " ... " or " / " (same convention as check_golden.py)
-    return [_norm(f) for f in re.split(r" \.\.\. | / ", item.evidence or "") if f.strip()]
+    return [a for part in _evidence_parts(item) for a in part]  # every quote, alternatives included
 
 
 def retrieval_scores(item: GoldenItem, result: QuestionResult) -> dict[str, float]:
@@ -50,12 +57,12 @@ def retrieval_scores(item: GoldenItem, result: QuestionResult) -> dict[str, floa
     doc_rank = next((i for i, d in enumerate(ids, start=1) if d == item.source_doc), None)
     scores = {"doc_hit": float(doc_rank is not None), "doc_mrr": 1 / doc_rank if doc_rank else 0.0}
 
-    fragments = _evidence_fragments(item)
-    if fragments:
+    parts = _evidence_parts(item)
+    if parts:
         contexts = [_norm(c) for c in result.output.contexts]
-        found = [f for f in fragments if any(f in c for c in contexts)]
-        ev_rank = next((i for i, c in enumerate(contexts, start=1) if any(f in c for f in fragments)), None)
-        scores["evidence_recall"] = len(found) / len(fragments)
+        found = [p for p in parts if any(a in c for a in p for c in contexts)]
+        ev_rank = next((i for i, c in enumerate(contexts, start=1) if any(a in c for p in parts for a in p)), None)
+        scores["evidence_recall"] = len(found) / len(parts)
         scores["evidence_mrr"] = 1 / ev_rank if ev_rank else 0.0
     return scores
 
